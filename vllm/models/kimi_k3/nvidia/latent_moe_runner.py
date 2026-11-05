@@ -9,7 +9,12 @@ import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
+    get_tp_group,
     tensor_model_parallel_all_reduce,
+)
+from vllm.distributed.device_communicators.nvlink_fabric import (
+    SymmetricMemoryTopology,
+    get_symmetric_memory_topology,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
@@ -92,15 +97,34 @@ class LatentMoERunner(MoERunner):
             )
             self.enable_k3_latent_moe_tail_fusion = False
 
+        if (
+            self.enable_k3_latent_moe_tail_fusion
+            and use_fused_path
+            and get_current_vllm_config().model_config.enable_sleep_mode
+        ):
+            logger.warning_once(
+                "K3 latent-MoE tail fusion does not support sleep mode. "
+                "Falling back to the default path."
+            )
+            self.enable_k3_latent_moe_tail_fusion = False
+
+        if (
+            self.enable_k3_latent_moe_tail_fusion
+            and use_fused_path
+            and get_symmetric_memory_topology(get_tp_group().cpu_group)
+            is SymmetricMemoryTopology.UNSUPPORTED
+        ):
+            logger.warning_once(
+                "K3 latent-MoE tail fusion requires TP ranks to share a "
+                "symmetric-memory fabric. Falling back to the default path."
+            )
+            self.enable_k3_latent_moe_tail_fusion = False
+
         if self.enable_k3_latent_moe_tail_fusion and use_fused_path:
             vllm_config = get_current_vllm_config()
             if vllm_config.parallel_config.use_ubatching:
                 raise ValueError(
                     "K3 latent-MoE tail fusion does not support DBO or ubatching."
-                )
-            if vllm_config.model_config.enable_sleep_mode:
-                raise ValueError(
-                    "K3 latent-MoE tail fusion does not support sleep mode."
                 )
             transform = self.routed_output_transform
             assert transform is not None
